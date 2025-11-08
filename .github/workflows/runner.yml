@@ -18,7 +18,7 @@ jobs:
           python-version: '3.10'
 
       - name: Install Python dependencies
-        run: pip install curl-cffi
+        run: pip install requests
 
       - name: Set up Go
         uses: actions/setup-go@v4
@@ -32,10 +32,6 @@ jobs:
         run: |
           git config --global user.name 'GitHub Actions Bot'
           git config --global user.email 'actions-bot@github.com'
-          if [ -d "output" ]; then
-            git add output/
-            git commit -m "Update proxy lists and log" || echo "No changes to commit"
-            git push
-          else
-            echo "Output directory not found. No changes to commit."
-          fi
+          git add output/
+          git commit -m "Update proxy lists and log" || echo "No changes to commit"
+          git push
