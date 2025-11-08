@@ -25,7 +25,7 @@ import (
 const (
 	proxyListURL       = "https://raw.githubusercontent.com/Arefgh72/vray-proxy-pars-tester/main/output/github_all.txt"
 
-	testURL            = "https://aistudio.google.com/"
+  testURL            = "https://aistudio.google.com/"
 	requestTimeout     = 12 * time.Second
 	xrayRepoAPI        = "https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 	xrayExecutable     = "xray"
@@ -410,7 +410,7 @@ func testProxies(proxies []string, xrayPath string) []HealthyProxy {
 
 	var healthyProxies []HealthyProxy
 	var wg sync.WaitGroup
-	var testedCount atomic.Int64
+	var testedCount, healthyCount atomic.Int64
 
 	proxyChan := make(chan string, totalProxies)
 	for _, p := range proxies {
@@ -428,13 +428,20 @@ func testProxies(proxies []string, xrayPath string) []HealthyProxy {
 			for proxyLink := range proxyChan {
 				result, err := testSingleProxy(xrayPath, proxyLink, localPort)
 
-				// Increment counter after each test
 				currentCount := testedCount.Add(1)
-				// Display progress
-				fmt.Printf("\rTesting... [%d/%d] (%.2f%%)", currentCount, totalProxies, float64(currentCount)*100/float64(totalProxies))
+				var currentHealthy int64
 
 				if err == nil {
+					currentHealthy = healthyCount.Add(1)
 					resultsChan <- result
+				} else {
+					currentHealthy = healthyCount.Load()
+				}
+
+				// Update progress every 10 proxies or on the last one
+				if currentCount%10 == 0 || currentCount == int64(totalProxies) {
+					healthyPercentage := float64(currentHealthy) * 100 / float64(currentCount)
+					fmt.Printf("\rTesting... [%d/%d] | Healthy: %d (%.2f%%)", currentCount, totalProxies, currentHealthy, healthyPercentage)
 				}
 			}
 		}(i)
