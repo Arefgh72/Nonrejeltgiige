@@ -18,12 +18,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
 	proxyListURL       = "https://raw.githubusercontent.com/Arefgh72/vray-proxy-pars-tester/main/output/github_all.txt"
-	testURL            = "https://www.youtube.com/"
+	testURL            = "https://www.cloudflare.com/cdn-cgi/trace"
 	requestTimeout     = 12 * time.Second
 	xrayRepoAPI        = "https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 	xrayExecutable     = "xray"
@@ -403,17 +404,20 @@ func testSingleProxy(xrayPath, proxyLink string, localPort int) (HealthyProxy, e
 }
 
 func testProxies(proxies []string, xrayPath string) []HealthyProxy {
+	totalProxies := len(proxies)
+	fmt.Printf("\n--- Starting to test %d proxies with %d concurrent workers... ---\n", totalProxies, maxConcurrentTests)
 
-	fmt.Printf("\n--- Starting to test %d proxies with %d concurrent workers... ---\n", len(proxies), maxConcurrentTests)
 	var healthyProxies []HealthyProxy
 	var wg sync.WaitGroup
-	proxyChan := make(chan string, len(proxies))
+	var testedCount atomic.Int64
+
+	proxyChan := make(chan string, totalProxies)
 	for _, p := range proxies {
 		proxyChan <- p
 	}
 	close(proxyChan)
 
-	resultsChan := make(chan HealthyProxy, len(proxies))
+	resultsChan := make(chan HealthyProxy, totalProxies)
 
 	for i := 0; i < maxConcurrentTests; i++ {
 		wg.Add(1)
@@ -422,8 +426,13 @@ func testProxies(proxies []string, xrayPath string) []HealthyProxy {
 			localPort := 1080 + workerID
 			for proxyLink := range proxyChan {
 				result, err := testSingleProxy(xrayPath, proxyLink, localPort)
+
+				// Increment counter after each test
+				currentCount := testedCount.Add(1)
+				// Display progress
+				fmt.Printf("\rTesting... [%d/%d] (%.2f%%)", currentCount, totalProxies, float64(currentCount)*100/float64(totalProxies))
+
 				if err == nil {
-					fmt.Printf("[OK] %s (%s)\n", result.Link[:min(60, len(result.Link))], result.Latency)
 					resultsChan <- result
 				}
 			}
