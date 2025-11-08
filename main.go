@@ -129,13 +129,10 @@ func readProxiesFromFile(filepath string) ([]string, error) {
 func createXrayConfig(proxyLink string, localPort int) ([]byte, string, error) {
 	var outbound map[string]interface{}
 	var protocol string
+	var err error
 
 	if strings.HasPrefix(proxyLink, "vmess://") {
-		var err error
 		outbound, err = parseVmess(proxyLink)
-		if err != nil {
-			return nil, "", err
-		}
 		protocol = "vmess"
 	} else {
 		u, err := url.Parse(proxyLink)
@@ -154,46 +151,111 @@ func createXrayConfig(proxyLink string, localPort int) ([]byte, string, error) {
 		default:
 			return nil, "", fmt.Errorf("unsupported protocol: %s", protocol)
 		}
-		if err != nil {
-			return nil, "", err
-		}
+	}
+
+	if err != nil {
+		return nil, "", err // Propagate parser errors
 	}
 
 	config := map[string]interface{}{
-		"inbounds":  []map[string]interface{}{{"port": localPort, "protocol": "socks", "settings": map[string]interface{}{"auth": "noauth"}}},
+		"log": map[string]interface{}{
+			"loglevel": "warning", // Reduce noise
+		},
+		"inbounds": []map[string]interface{}{{
+			"port":     localPort,
+			"protocol": "socks",
+			"settings": map[string]interface{}{"auth": "noauth"},
+		}},
 		"outbounds": []map[string]interface{}{outbound},
 	}
-	configBytes, err := json.Marshal(config)
+
+	configBytes, err := json.MarshalIndent(config, "", "  ") // Use MarshalIndent for readability
 	return configBytes, protocol, err
 }
 
 func parseVlessTrojan(u *url.URL) (map[string]interface{}, error) {
 	port, _ := strconv.Atoi(u.Port())
-	return map[string]interface{}{
-		"protocol": u.Scheme,
-		"settings": map[string]interface{}{
-			"vnext": []map[string]interface{}{{
-				"address": u.Hostname(),
-				"port":    port,
-				"users":   []map[string]interface{}{{"id": u.User.Username()}},
-			}},
+	q := u.Query()
+
+	// Base vnext structure
+	vnext := map[string]interface{}{
+		"address": u.Hostname(),
+		"port":    port,
+		"users": []map[string]interface{}{
+			{"id": u.User.Username()},
 		},
+	}
+
+	// Add flow for vless
+	if u.Scheme == "vless" {
+		vnext["users"].([]map[string]interface{})[0]["flow"] = "xtls-rprx-vision"
+	}
+
+	// Stream settings
+	streamSettings := map[string]interface{}{
+		"network":  q.Get("type"),
+		"security": q.Get("security"),
+	}
+
+	// TLS settings
+	if q.Get("security") == "tls" {
+		tlsSettings := map[string]interface{}{"serverName": q.Get("sni")}
+		if q.Get("alpn") != "" {
+			tlsSettings["alpn"] = strings.Split(q.Get("alpn"), ",")
+		}
+		streamSettings["tlsSettings"] = tlsSettings
+	}
+
+	// Specific network settings
+	switch q.Get("type") {
+	case "ws":
+		streamSettings["wsSettings"] = map[string]interface{}{
+			"path": q.Get("path"),
+			"headers": map[string]string{
+				"Host": q.Get("host"),
+			},
+		}
+	case "grpc":
+		streamSettings["grpcSettings"] = map[string]interface{}{
+			"serviceName": q.Get("serviceName"),
+		}
+	}
+
+	return map[string]interface{}{
+		"protocol":       u.Scheme,
+		"settings":       map[string]interface{}{"vnext": []map[string]interface{}{vnext}},
+		"streamSettings": streamSettings,
 	}, nil
 }
 
 func parseShadowsocks(u *url.URL) (map[string]interface{}, error) {
-	var method, password string
 	port, _ := strconv.Atoi(u.Port())
 
-	userInfo := strings.SplitN(strings.TrimPrefix(u.String(), "ss://"), "@", 2)[0]
-	decoded, err := base64.StdEncoding.WithPadding(base64.NoPadding).DecodeString(userInfo)
+	// Handle two types of ss links:
+	// 1. ss://method:password@server:port
+	// 2. ss://base64(method:password)@server:port
+
+	var method, password string
+
+	userInfo := u.User.String()
+
+	// Check if user info is Base64 encoded
+	decoded, err := base64.URLEncoding.DecodeString(userInfo)
 	if err == nil {
 		userInfo = string(decoded)
+	} else {
+		// If not base64, URL decoding might have happened, so re-encode then decode to handle special chars
+		 reEncoded, _ := url.QueryUnescape(userInfo)
+		 decoded, err = base64.StdEncoding.WithPadding(base64.NoPadding).DecodeString(reEncoded)
+		 if err == nil {
+			 userInfo = string(decoded)
+		 }
 	}
+
 
 	parts := strings.SplitN(userInfo, ":", 2)
 	if len(parts) != 2 {
-		return nil, fmt.Errorf("invalid ss format: %s", userInfo)
+		return nil, fmt.Errorf("invalid shadowsocks user info format: %s", userInfo)
 	}
 	method, password = parts[0], parts[1]
 
@@ -216,39 +278,63 @@ func parseVmess(proxyLink string) (map[string]interface{}, error) {
 
 	decoded, err := base64.StdEncoding.DecodeString(sanitizedLink)
 	if err != nil {
-		return nil, fmt.Errorf("invalid vmess link: %w", err)
+		// Try URL-safe decoding as a fallback
+		decoded, err = base64.URLEncoding.DecodeString(sanitizedLink)
+		if err != nil {
+			return nil, fmt.Errorf("invalid vmess link (base64 decode failed): %w", err)
+		}
 	}
 
-	var vmessDetails struct {
-		Add  string      `json:"add"`
-		Port interface{} `json:"port"`
-		ID   string      `json:"id"`
-		Aid  interface{} `json:"aid"`
-		Net  string      `json:"net"`
-	}
+	var vmessDetails map[string]interface{}
 	if err := json.Unmarshal(decoded, &vmessDetails); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal vmess json: %w", err)
 	}
 
-	port, _ := strconv.Atoi(fmt.Sprintf("%v", vmessDetails.Port))
-	aid, _ := strconv.Atoi(fmt.Sprintf("%v", vmessDetails.Aid))
+	port, _ := strconv.Atoi(fmt.Sprintf("%v", vmessDetails["port"]))
+	aid, _ := strconv.Atoi(fmt.Sprintf("%v", vmessDetails["aid"]))
 
-	return map[string]interface{}{
+	outbound := map[string]interface{}{
 		"protocol": "vmess",
 		"settings": map[string]interface{}{
 			"vnext": []map[string]interface{}{{
-				"address": vmessDetails.Add,
+				"address": fmt.Sprintf("%v", vmessDetails["add"]),
 				"port":    port,
 				"users": []map[string]interface{}{{
-					"id":      vmessDetails.ID,
-					"alterId": aid,
+					"id":       fmt.Sprintf("%v", vmessDetails["id"]),
+					"alterId":  aid,
+					"security": "auto", // Best practice
 				}},
 			}},
 		},
 		"streamSettings": map[string]interface{}{
-			"network": vmessDetails.Net,
+			"network":  fmt.Sprintf("%v", vmessDetails["net"]),
+			"security": fmt.Sprintf("%v", vmessDetails["tls"]),
 		},
-	}, nil
+	}
+
+	streamSettings := outbound["streamSettings"].(map[string]interface{})
+
+	if vmessDetails["tls"] == "tls" {
+		streamSettings["tlsSettings"] = map[string]interface{}{
+			"serverName": fmt.Sprintf("%v", vmessDetails["sni"]),
+		}
+	}
+
+	switch vmessDetails["net"] {
+	case "ws":
+		streamSettings["wsSettings"] = map[string]interface{}{
+			"path": fmt.Sprintf("%v", vmessDetails["path"]),
+			"headers": map[string]string{
+				"Host": fmt.Sprintf("%v", vmessDetails["host"]),
+			},
+		}
+	case "grpc":
+		streamSettings["grpcSettings"] = map[string]interface{}{
+			"serviceName": fmt.Sprintf("%v", vmessDetails["path"]),
+		}
+	}
+
+	return outbound, nil
 }
 
 func parseHysteria(u *url.URL) (map[string]interface{}, error) {
@@ -285,7 +371,8 @@ func testSingleProxy(xrayPath, proxyLink string, localPort int) (HealthyProxy, e
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout+2*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, xrayPath, "-c", configFile.Name())
+	// ---- FIX: Use "./xray" to specify the executable in the current directory ----
+	cmd := exec.CommandContext(ctx, "./"+xrayPath, "-c", configFile.Name())
 	if err := cmd.Start(); err != nil {
 		return HealthyProxy{}, err
 	}
@@ -316,6 +403,7 @@ func testSingleProxy(xrayPath, proxyLink string, localPort int) (HealthyProxy, e
 }
 
 func testProxies(proxies []string, xrayPath string) []HealthyProxy {
+
 	fmt.Printf("\n--- Starting to test %d proxies with %d concurrent workers... ---\n", len(proxies), maxConcurrentTests)
 	var healthyProxies []HealthyProxy
 	var wg sync.WaitGroup
