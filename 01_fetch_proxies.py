@@ -1,34 +1,64 @@
-import requests
+# --- تغییر اصلی: استفاده از curl_cffi ---
+from curl_cffi.requests import get
 import base64
-import sys
+import os
+import sys # برای چاپ خطا
 
-def fetch_proxies():
-    """
-    Fetches the list of proxy sources, decodes them, and saves the raw proxies to a file.
-    """
-    url = "https://raw.githubusercontent.com/Arefgh72/v2ray-proxy-pars-tester/main/output/github_all.txt"
+# --- آدرس ثابت منبع پراکسی ---
+SUBSCRIPTION_URL = "https://raw.githubusercontent.com/Arefgh72/v2ray-proxy-pars-tester/main/output/github_all.txt"
+RAW_PROXIES_OUTPUT_PATH = 'all_proxies_raw.txt' # سازگار با برنامه Go
+
+def log_error(source, message, details):
+    """یک تابع ساده برای لاگ خطا در stderr."""
+    print(f"ERROR [{source}]: {message} | Details: {details}", file=sys.stderr)
+
+def fetch_and_decode_link(link: str) -> list[str]:
+    """پراکسی‌ها را از یک لینک دریافت و دیکود می‌کند."""
+    clean_link = link.split('#')[0].strip()
     try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()  # Raise an exception for bad status codes
+        print(f"Fetching: {clean_link[:80]}...")
+        # --- تغییر اصلی: استفاده از impersonate برای تقلید از مرورگر کروم ---
+        response = get(clean_link, timeout=30, impersonate="chrome110")
+        response.raise_for_status()
 
-        # The content seems to be base64 encoded, let's decode it.
+        content = response.text
+        proxies = []
+
         try:
-            decoded_content = base64.b64decode(response.content)
-            # Save the decoded content to a file for the Go program to read
-            with open("all_proxies_raw.txt", "w", encoding="utf-8") as f:
-                f.write(decoded_content.decode('utf-8', errors='ignore'))
-            print("Successfully fetched and saved proxies to all_proxies_raw.txt")
-        except (base64.binascii.Error, UnicodeDecodeError) as e:
-            print(f"Error decoding content: {e}", file=sys.stderr)
-            # If decoding fails, save the raw content for inspection
-            with open("all_proxies_raw.txt", "w", encoding="utf-8") as f:
-                f.write(response.text)
-            print("Decoding failed. Saved raw (undecoded) content for inspection.", file=sys.stderr)
-            sys.exit(1)
+            # تلاش برای دیکود کردن محتوای Base64
+            decoded_content = base64.b64decode(content).decode('utf-8')
+            proxies = decoded_content.splitlines()
+            print(f"  -> Decoded as Base64.")
+        except Exception:
+            # اگر دیکود نشد، به عنوان متن ساده پردازش می‌شود
+            proxies = content.splitlines()
+            print(f"  -> Processed as Plain Text.")
 
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching proxy sources: {e}", file=sys.stderr)
-        sys.exit(1)
+        # --- فیلتر کردن پراکسی‌های معتبر ---
+        VALID_PROTOCOLS = ('vmess://', 'vless://', 'trojan://', 'ss://', 'hy://', 'hysteria://', 'hy2://')
+        valid_proxies = [p.strip() for p in proxies if p.strip().startswith(VALID_PROTOCOLS)]
+        print(f"  -> Found {len(valid_proxies)} valid proxies.")
+        return valid_proxies
+
+    except Exception as e:
+        log_error("Fetch Proxies (Network)", f"Failed to fetch from link: {clean_link}", str(e))
+        return []
+
+def main():
+    print("--- Running 01_fetch_proxies.py (with Browser Impersonation) ---")
+
+    # --- مستقیم پراکسی‌ها را از لینک ثابت دریافت می‌کند ---
+    all_proxies = fetch_and_decode_link(SUBSCRIPTION_URL)
+
+    # --- حذف پراکسی‌های تکراری ---
+    unique_proxies = list(dict.fromkeys(all_proxies))
+    print(f"\nTotal unique proxies fetched: {len(unique_proxies)}")
+
+    # --- ذخیره پراکسی‌ها در فایل خروجی ---
+    with open(RAW_PROXIES_OUTPUT_PATH, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(unique_proxies))
+    print(f"Successfully saved {len(unique_proxies)} proxies to '{RAW_PROXIES_OUTPUT_PATH}'.")
+    print("--- Finished 01_fetch_proxies.py ---")
 
 if __name__ == "__main__":
-    fetch_proxies()
+    main()
