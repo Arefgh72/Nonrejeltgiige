@@ -8066,3 +8066,12 @@ Healthy proxies by type:
 - Vmess: 3
 --- Cycle End ---
 
+--- Cycle Start: 2026-01-27T04:54:29Z ---
+Total proxies tested: 17602
+Total healthy proxies: 5918
+
+Healthy proxies by type:
+- Ss: 5911
+- Vmess: 7
+--- Cycle End ---
+
